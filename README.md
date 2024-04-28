@@ -68,6 +68,7 @@ Configuration information is stored as parameters in System Manager Parameter St
 `git clone https://github.com/aws-samples/voice-channel-for-outbound-campaigns`
 
 2. Build the solution with SAM.
+
 `sam build` 
 
 
@@ -80,7 +81,6 @@ SAM can save this information if you plan un doing changes, answer Y when prompt
 
 
 ## Configure Amazon Connect Agent Events and Contact Trace Records.
-
 
 ## Get Amazon Connect Configuration
 
