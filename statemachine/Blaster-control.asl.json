@@ -1,0 +1,302 @@
+{
+  "Comment": "Blaster Initialization and core blaster start",
+  "StartAt": "SetConfigTable",
+  "States": {
+      "SetConfigTable": {
+      "Type": "Pass",
+      "Result": {
+        "activeBlaster": "${ParameterBlasterStatus}",
+        "dialindex": "${ParameterIndex}"
+      },
+      "ResultPath": "$.config",
+      "Next": "ActivateBlaster"
+    },
+    "ActivateBlaster": {
+      "Comment": "Activate blaster",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+      "Parameters": {
+        "Name": "${ParameterBlasterStatus}",
+        "Overwrite": true,
+        "Value": "True"
+      },
+      "Next": "GetConfig",
+      "ResultPath": null
+    },
+    "GetConfig": {
+      "Comment": "Get configuration parameters",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "deactivateBlasterDueError"
+        }
+      ],
+      "Parameters": {
+        "FunctionName": "${BlastergetConfigArn}",
+        "Payload": {
+          "Input.$": "$"
+        }
+      },
+      "Next": "Blaster",
+      "ResultPath": "$.params",
+      "ResultSelector": {
+        "totalRecords.$": "$.Payload.totalRecords",
+        "table-activedialing.$": "$.Payload.table-activedialing",
+        "contactflow.$": "$.Payload.contactflow",
+        "connectid.$": "$.Payload.connectid",
+        "queue.$": "$.Payload.queue",
+        "concurrentCalls.$": "$.Payload.concurrentCalls",
+        "dialerThreads.$": "$.Payload.dialerThreads",
+	"timeOut.$":"$.Payload.timeOut"
+      }
+    },
+    "Blaster": {
+      "Type": "Map",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "deactivateBlasterDueError"
+        }
+      ],
+      "ResultPath": "$.mapOutput",
+      "ItemsPath": "$.params.dialerThreads",
+      "InputPath": "$",
+      "Parameters": {
+        "params.$": "$.params",
+        "config.$": "$.config"
+      },
+      "Iterator": {
+        "StartAt": "GetBlasterStatus",
+        "States": {
+          "GetBlasterStatus": {
+            "Type": "Task",
+            "Parameters": {
+              "Name": "${ParameterBlasterStatus}"
+            },
+            "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+            "Next": "GetConnectStatus",
+            "ResultSelector": {
+              "value.$": "$.Parameter.Value"
+            },
+            "ResultPath": "$.params.activeBlaster"
+          },
+          "GetConnectStatus": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "Payload": {
+                "params.$": "$.params"
+              },
+              "FunctionName": "${BlastergetConnectStatusArn}"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Next": "isBlasterActive",
+            "ResultPath": "$.connect",
+            "ResultSelector": {
+              "queueEnabled.$": "$.Payload.queueEnabled",
+              "workingHours.$": "$.Payload.workingHours"
+            },
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "ThreadFailed"
+              }
+            ]
+          },
+          "getContacts": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "Payload": {
+                "config.$": "$.config",
+                "params.$": "$.params",
+                "concurrentCalls": 1
+              },
+              "FunctionName": "${BlastergetContactsArn}"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Next": "isListEmpty",
+            "ResultSelector": {
+              "entries.$": "$.Payload.contacts",
+              "EndOfList.$": "$.Payload.EndOfList"
+            },
+            "ResultPath": "$.contacts"
+          },
+          "isListEmpty": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.contacts.EndOfList",
+                "StringEquals": "False",
+                "Next": "Dial"
+              }
+            ],
+            "Default": "ThreadDeactivateBlaster"
+          },
+          "ThreadDeactivateBlaster": {
+            "Type": "Task",
+            "Next": "ThreadCompleted",
+            "Parameters": {
+              "Name": "${ParameterBlasterStatus}",
+              "Overwrite": true,
+              "Value": "False"
+            },
+            "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+            "Comment": "Set activeBlaster parameter to false to finish dialing process."
+          },
+          "ThreadFailed": {
+            "Type": "Pass",
+            "Next": "Fail"
+          },
+          "Fail": {
+            "Type": "Fail"
+          },
+          "Dial": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+            "Parameters": {
+              "FunctionName": "${BlasterdialArn}",
+              "Payload": {
+                "config.$": "$.config",
+                "params.$": "$.params",
+                "contacts.$": "$.contacts.entries[0]",
+                "TaskToken.$": "$$.Task.Token"
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Next": "GetBlasterStatus",
+	    "TimeoutSecondsPath": "$.params.timeOut",
+            "ResultPath": null,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.Timeout"
+                ],
+                "Comment": "TimeOut",
+                "Next": "GetBlasterStatus",
+                "ResultPath": null
+              },
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "ThreadDeactivateBlaster",
+                "ResultPath": null
+              }
+            ]
+          },
+          "isBlasterActive": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "And": [
+                  {
+                    "Variable": "$.params.activeBlaster.value",
+                    "StringEquals": "True"
+                  },
+                  {
+                    "Variable": "$.connect.queueEnabled",
+                    "StringEquals": "True"
+                  },
+                  {
+                    "Variable": "$.connect.workingHours",
+                    "StringEquals": "True"
+                  }
+                ],
+                "Next": "getContacts"
+              }
+            ],
+            "Default": "ThreadCompleted"
+          },
+          "ThreadCompleted": {
+            "Type": "Pass",
+            "Next": "Success"
+          },
+          "Success": {
+            "Type": "Succeed"
+          }
+        },
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        }
+      },
+      "Next": "deactivateBlaster",
+      "Label": "Blaster",
+      "MaxConcurrency": 1000,
+      "ToleratedFailurePercentage": 50
+    },
+    "deactivateBlaster": {
+      "Comment": "Deactivate blaster",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+      "Parameters": {
+        "Name": "${ParameterBlasterStatus}",
+        "Overwrite":true,
+        "Value": "False"
+      },
+      "Next": "blasterFinished"
+    },
+    "deactivateBlasterDueError": {
+      "Comment": "Deactivate blaster due a problem",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+      "Parameters": {
+        "Name": "${ParameterBlasterStatus}",
+        "Overwrite":true,
+        "Value": "False"
+      },
+      "Next": "blasterError"
+    },
+    "blasterFinished": {
+      "Type": "Succeed"
+    },
+    "blasterError": {
+      "Type": "Fail"
+    }
+  }
+}

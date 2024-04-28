@@ -1,0 +1,728 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Blaster for Amazon Connect Application.
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 128
+    Runtime: python3.9
+
+Parameters:
+  ConnectInstanceId:
+    Type: String
+    AllowedPattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    Description: Amazon Connect Instance ID to use for the outbound call
+  ConnectContactFlowId:
+    Type: String
+    AllowedPattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    Description: Amazon Connect Contact Flow ID to use for the outbound call
+  ConnectQueueId:
+    Type: String
+    AllowedPattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    Description: Amazon Connect Queue ID to use for the outbound call
+  CountryCode:
+    Type: Number
+    Default: 52
+    Description: Country code of destination country
+  ISOCountryCode:
+    Type: String
+    Default: MX
+    MaxLength: 2
+    Description: 2 letter code for country code
+  ConcurrentCalls:
+    Type: Number
+    Default: 1
+    Description: Number of calls to be called simultaneously.
+  CallTimeOut:
+    Type: Number
+    Default: 3600
+    Description: Timeout in seconds for each call
+
+Resources:
+
+  dialinglistbucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-', ['blaster-input-bucket', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+    DeletionPolicy: Delete
+  
+  resultsbucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-', ['blaster-output-bucket', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+    DeletionPolicy: Delete
+
+  ActiveDialing:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - 
+          AttributeName: "contactId"
+          AttributeType: "S"
+
+      KeySchema: 
+        - 
+          AttributeName: "contactId"
+          KeyType: "HASH"
+
+      BillingMode: "PAY_PER_REQUEST"
+      
+      PointInTimeRecoverySpecification: 
+        PointInTimeRecoveryEnabled: True
+      SSESpecification:
+        SSEEnabled: True
+      TimeToLiveSpecification:
+          AttributeName: "TimeToLive"
+          Enabled: True
+  
+  ControlSFRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: LogAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogDelivery'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:GetLogEvents'
+                Resource:
+                  - '*'
+
+        -
+          PolicyName: ConfigTableAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:UpdateItem'
+                Resource:
+                  - !GetAtt ActiveDialing.Arn   
+        -
+          PolicyName: ControlStateMachine
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:StartExecution
+                  - states:StopExecution
+                Resource: "*"
+              -
+                Effect: Allow
+                Action:
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule
+              -
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt dial.Arn
+                  - !GetAtt getConfig.Arn
+                  - !GetAtt getContacts.Arn
+                  - !GetAtt ListLoad.Arn
+                  - !GetAtt getConnectStatus.Arn
+        -
+          PolicyName: ParameterAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'ssm:GetParametersByPath'
+                  - 'ssm:GetParameter'
+                  - 'ssm:PutParameter'
+                Resource:
+                  - '*'
+    
+  BlasterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
+      Policies:
+        -
+          PolicyName: BucketAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 
+                    - 'arn:aws:s3:::${dialingListBucket}'
+                    - dialingListBucket: !Join ['-', ['blaster-input-bucket', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+                  - !Sub 
+                    - 'arn:aws:s3:::${dialingListBucket}/*'
+                    - dialingListBucket: !Join ['-', ['blaster-input-bucket', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+                  - !Sub 
+                    - 'arn:aws:s3:::${resultsbucket}'
+                    - dialingListBucket: !Join ['-', ['blaster-output-bucket', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+                  - !Sub 
+                    - 'arn:aws:s3:::${resultsbucket}/*'
+                    - dialingListBucket: !Join ['-', ['blaster-output-bucket', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+
+        -
+          PolicyName: ControlStateMachine
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:StartExecution
+                  - states:StopExecution
+                Resource:                   
+                  - !Sub 
+                    - 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${BlasterControlName}'
+                    - BlasterControlName: !Join ['-', ['BlasterControlSF', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+
+        -
+          PolicyName: ConfigTableAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:UpdateItem'
+                Resource:
+                  - !GetAtt ActiveDialing.Arn
+
+        -
+          PolicyName: SendTaskToken
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'states:SendTaskSuccess'
+                  - 'states:SendTaskFailure'
+                  - 'states:SendTaskHeartbeat'
+                Resource:
+                  - '*'
+        -
+          PolicyName: ConnectPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'connect:StartOutboundVoiceContact'
+                  - 'connect:DescribeHoursOfOperation'
+                  - 'connect:GetCurrentMetricData'
+                  - 'connect:DescribeQueue'
+                Resource:
+                  - '*'
+        -
+          PolicyName: getCurrentMetricData
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'connect:GetCurrentMetricData'
+                Resource:
+                  - '*'
+
+
+        -
+          PolicyName: ParameterAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'ssm:GetParametersByPath'
+                  - 'ssm:GetParameter'
+                  - 'ssm:PutParameter'
+                Resource:
+                  - '*'
+        -
+          PolicyName: EventRules
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'lambda:AddPermission'
+                  - 'lambda:RemovePermission'
+                  - 'events:PutRule'
+                  - 'events:DeleteRule'
+                  - 'events:PutTargets'
+                  - 'events:RemoveTargets'
+                Resource:
+                  - '*'
+        -
+          PolicyName: EncryptionAcess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource:
+                  - '*'
+        -
+          PolicyName: DataMovement
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'firehose:*'
+                  - 'kinesis:*'
+                  - 'sqs:*'
+                Resource:
+                  - '*'
+        -
+          PolicyName: PinpointAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - 'mobiletargeting:GetVoiceTemplate'
+                  - 'mobiletargeting:GetCampaign'
+                  - 'mobiletargeting:GetSegment'
+                  - 'mobiletargeting:PhoneNumberValidate'
+                  - 'mobiletargeting:UpdateCampaign'
+                  - 'mobiletargeting:PutEvents'
+                Resource:
+                  - '*'
+
+  CampaignLauncherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        -
+          PolicyName: ControlStateMachine
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:StartExecution
+                  - states:StopExecution
+                Resource: '*'
+              -
+                Effect: Allow
+                Action:
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule
+  KinesisFirehoseDeliveryRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - firehose.amazonaws.com
+              - s3.amazonaws.com
+            Action: sts:AssumeRole
+        Path: /
+        Policies:
+          - PolicyName: deliveryToS3
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+              - Sid: deliveryToS3
+                Effect: Allow
+                Action:
+                - s3:AbortMultipartUpload
+                - s3:GetBucketLocation
+                - s3:GetObject
+                - s3:ListBucket
+                - s3:ListBucketMultipartUploads
+                - s3:PutObject
+                Resource: "*"
+
+  BlasterControlSF:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Join ['-', ['BlasterControlSF', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Role: !GetAtt ControlSFRole.Arn
+      DefinitionUri: statemachine/Blaster-control.asl.json
+      DefinitionSubstitutions:
+        BlasterdialArn: !GetAtt dial.Arn
+        BlastergetConfigArn: !GetAtt getConfig.Arn
+        BlastergetContactsArn: !GetAtt getContacts.Arn
+        BlasterListLoadArn: !GetAtt ListLoad.Arn
+        BlastergetConnectStatusArn: !GetAtt getConnectStatus.Arn
+        ParameterIndex: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'dialIndex']]
+        ParameterTotalRecords: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'totalRecords']]
+        ParameterActiveDialing: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'table-activedialing']]
+        ParameterBlasterStatus: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'activeBlaster']]
+        
+  ResultsFirehose:
+    Type: 'AWS::KinesisFirehose::DeliveryStream'
+    Properties:
+      DeliveryStreamType: DirectPut
+      DeliveryStreamName: !Join ['-', ['blaster-results', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      S3DestinationConfiguration:
+        BucketARN: !GetAtt resultsbucket.Arn
+        BufferingHints:
+          IntervalInSeconds: '60'
+          SizeInMBs: '10'
+        CompressionFormat: UNCOMPRESSED
+        RoleARN: !GetAtt 
+          - KinesisFirehoseDeliveryRole
+          - Arn
+
+  DialingListQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join ['-', ['blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      VisibilityTimeout: 30
+      DelaySeconds: 0
+      MessageRetentionPeriod: 86400
+    
+  Blaster:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: Blaster-layer/
+      CompatibleRuntimes:
+        - python3.9
+        - python3.10
+        - python3.11
+        - python3.12
+    Metadata:
+      BuildMethod: python3.9
+
+
+  dial:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-dial/
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          BLASTER_DEPLOYMENT: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          ACTIVE_DIALING_TABLE: !Ref ActiveDialing
+          RESULTS_FIREHOSE_NAME: !Ref ResultsFirehose
+
+  getConnectStatus:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-connectStatus/
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref Blaster
+  
+  getConfig:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-getConfig/
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          BLASTER_DEPLOYMENT: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+
+  getContacts:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-getContacts/
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          BLASTER_DEPLOYMENT: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          SQS_URL: !Ref DialingListQueue
+
+  queueContacts:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-queueContacts/
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          BLASTER_DEPLOYMENT: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          SQS_URL: !Ref DialingListQueue
+          SFN_ARN: !Ref BlasterControlSF
+          RESULTS_FIREHOSE_NAME: !Ref ResultsFirehose
+          
+  pinpointLambdaPermission:
+      Type: AWS::Lambda::Permission
+      Properties: 
+        Action: 'lambda:InvokeFunction'
+        FunctionName: !Ref queueContacts
+        Principal: !Sub pinpoint.${AWS::Region}.amazonaws.com
+        SourceArn: !Sub arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/*
+
+
+  ListLoad:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-ListLoad/
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 600
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          BLASTER_DEPLOYMENT: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          SQS_URL: !Ref DialingListQueue
+      Events:
+        LoadFileEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref dialinglistbucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: ".csv"    
+
+  contactSource:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'contact-source']]
+      Type: String
+      Value: 's3'
+  
+  
+  parameterIndex:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'dialIndex']]
+      Type: String
+      Value: '0'
+  
+  parameterBlasterStatus:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'activeBlaster']]
+      Type: String
+      Value: 'False'  
+
+  parameterTotalRecords:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'totalRecords']]
+      Type: String
+      Value: '0'
+  
+  parameterActiveDialing:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'table-activedialing']]
+      Type: String
+      Value: !Ref ActiveDialing
+
+  parameterContactFlow:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'contactflow']]
+      Type: String
+      Value: !Ref ConnectContactFlowId
+
+  parameterOutputBucket:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'ResultsBucket']]
+      Type: String
+      Value: !Ref resultsbucket
+
+  parametertimeOut:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'timeOut']]
+      Type: String
+      Value: !Ref CallTimeOut
+
+  parameterConnectId:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'connectid']]
+      Type: String
+      Value: !Ref ConnectInstanceId
+  parameterQueue:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'queue']]
+      Type: String
+      Value: !Ref ConnectQueueId
+  parameterCountryCode:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'countrycode']]
+      Type: String
+      Value: !Ref CountryCode
+  parameterISOCountryCode:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'isocountrycode']]
+      Type: String
+      Value: !Ref ISOCountryCode
+  parameterconcurrentCalls:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Name: !Join ['/', ['/connect/blaster', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]],'concurrentCalls']]
+      Type: String
+      Value: !Ref ConcurrentCalls
+
+
+
+  SetDispositionCode:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-setDisposition/
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          BLASTER_DEPLOYMENT: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+          RESULTS_FIREHOSE_NAME: !Ref ResultsFirehose
+
+
+  ProcessContactEvents:
+    Type: AWS::Serverless::Function 
+    Properties:
+      Role: !GetAtt BlasterLambdaRole.Arn
+      CodeUri: Blaster-ProcessContactEvents/
+      Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 600
+      Layers:
+        - !Ref Blaster
+      Environment: 
+        Variables:
+          ACTIVE_DIALING: !Ref ActiveDialing
+  
+  ContactEventsRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Amazon Connect API invoked disconnection events monitor 
+      EventPattern: {"source": ["aws.connect"],"detail-type": ["Amazon Connect Contact Event"],"detail": {"eventType": ["DISCONNECTED"],"channel": ["VOICE"],"initiationMethod": ["API"]}}
+      Name: !Join ['-', ['connect-events', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      State: ENABLED
+      Targets: 
+        - 
+          Arn: !GetAtt ProcessContactEvents.Arn
+          Id: 'ConnectContactDisconnects'
+  
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProcessContactEvents.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ContactEventsRule.Arn
+
+  CampaignLaunchSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Initiate blaster campaign"
+      ScheduleExpression: 'cron(0 14 ? * MON-SUN *)'
+      State: 'DISABLED'
+      Targets:
+        -
+          Id: "CampaignStarter"
+          RoleArn: !GetAtt CampaignLauncherRole.Arn
+          Arn: !GetAtt BlasterControlSF.Arn
+
+Outputs:
+  InputBucket:
+    Description: "Bucket for List Loading and Results generation"
+    Value: !Ref dialinglistbucket 
+  ConnectConfigConnectId:
+    Description: "Connect - Instance Id parameter"
+    Value: !Ref parameterConnectId
+  ConnectConfigQueue:
+    Description: "Connect - Queue parameter"
+    Value: !Ref parameterQueue 
+  ConnectConfigContactFlow:
+    Description: "Connect - ContactFlow Id parameter"
+    Value: !Ref parameterContactFlow
