@@ -20,7 +20,7 @@ def lambda_handler(event, context):
     phone=event['Details']['ContactData']['Attributes'].get('phone',False)
     
     instanceId=instanceArn.split("/")[-1]
-    results = {'phone':phone,'validNumber':True,'contactId':contactId}
+    results = {'CampaignStep':'CallCompleted','phone':phone,'contactId':contactId,'dispositionCode':dispositionCode}
     #update_dial_list(int(dialIndex), 'disposition', dispositionCode, DIALING_LIST)
     save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
     
