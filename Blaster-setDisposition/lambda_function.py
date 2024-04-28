@@ -7,7 +7,6 @@ from blaster import update_dial_list, save_results
 connect=boto3.client('connect')
 
 def lambda_handler(event, context):
-    DIALING_LIST = os.environ['DIALING_LIST']
     BLASTER_DEPLOYMENT = os.environ['BLASTER_DEPLOYMENT']
     RESULTS_FIREHOSE_NAME = os.environ['RESULTS_FIREHOSE_NAME']
     
@@ -16,12 +15,10 @@ def lambda_handler(event, context):
     
     instanceArn= event['Details']['ContactData']['InstanceARN']
     dispositionCode= event['Details']['ContactData']['Attributes'].get('dispositionCode',False)
-    #dialIndex= event['Details']['ContactData']['Attributes'].get('index',False)
     phone=event['Details']['ContactData']['Attributes'].get('phone',False)
     
     instanceId=instanceArn.split("/")[-1]
     results = {'CampaignStep':'CallCompleted','phone':phone,'contactId':contactId,'dispositionCode':dispositionCode}
-    #update_dial_list(int(dialIndex), 'disposition', dispositionCode, DIALING_LIST)
     save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
     
     if(contactId and dispositionCode):
