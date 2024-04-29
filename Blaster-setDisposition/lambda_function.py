@@ -20,7 +20,6 @@ def lambda_handler(event, context):
     if('Attributes' in event['Details']['ContactData'] and len(event['Details']['ContactData']['Attributes'])>0):
         for attkey in event['Details']['ContactData']['Attributes'].keys():
             results.update({attkey:event['Details']['ContactData']['Attributes'][attkey]})
-    print("results",results)
     
     save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
     
