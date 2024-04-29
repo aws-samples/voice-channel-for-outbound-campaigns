@@ -5,22 +5,29 @@ import os
 from blaster import update_dial_list, save_results
 
 connect=boto3.client('connect')
+BLASTER_DEPLOYMENT = os.environ['BLASTER_DEPLOYMENT']
+RESULTS_FIREHOSE_NAME = os.environ['RESULTS_FIREHOSE_NAME']
 
 def lambda_handler(event, context):
-    BLASTER_DEPLOYMENT = os.environ['BLASTER_DEPLOYMENT']
-    RESULTS_FIREHOSE_NAME = os.environ['RESULTS_FIREHOSE_NAME']
-    
     print(event)
-    contactId = event['Details']['ContactData']['Attributes'].get('contactId',False)
+
+    contactId = event['Details']['ContactData'].get('InitialContactId',False)
+    phone=event['Details']['ContactData'].get('CustomerEndpoint',False)
     
-    instanceArn= event['Details']['ContactData']['InstanceARN']
-    dispositionCode= event['Details']['ContactData']['Attributes'].get('dispositionCode',False)
-    phone=event['Details']['ContactData']['Attributes'].get('phone',False)
     
-    instanceId=instanceArn.split("/")[-1]
-    results = {'CampaignStep':'CallCompleted','phone':phone,'contactId':contactId,'dispositionCode':dispositionCode}
+    results = {'CampaignStep':'CallCompleted','phone':phone,'contactId':contactId}
+    
+    if('Attributes' in event['Details']['ContactData'] and len(event['Details']['ContactData']['Attributes'])>0):
+        for attkey in event['Details']['ContactData']['Attributes'].keys():
+            results.update({attkey:event['Details']['ContactData']['Attributes'][attkey]})
+    print("results",results)
+    
     save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
     
+    '''
+    #instanceArn= event['Details']['ContactData']['InstanceARN']
+    #instanceId=instanceArn.split("/")[-1]
+
     if(contactId and dispositionCode):
         response = connect.update_contact_attributes(
         InitialContactId=contactId,
@@ -32,6 +39,7 @@ def lambda_handler(event, context):
         return {
         'Tagged': True
         }
+    '''
     return {
-        'Tagged': False
+        'Saved': True
         } 
