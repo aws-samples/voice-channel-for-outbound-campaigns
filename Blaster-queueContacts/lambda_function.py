@@ -87,11 +87,12 @@ def lambda_handler(event, context):
     if(count):
         print("Contacts added to queue, validating blaster status.")
         dialerStatus = get_config('activeDialer', BLASTER_DEPLOYMENT)
-        if(dialerStatus == "False" and check_sf_executions(SFN_ARN)):
-            print("SF already started")
-        else:
+        if(dialerStatus == "False" and check_sf_executions(SFN_ARN)==0):
             print("SF inactive, starting.")
             print(launchBlaster(SFN_ARN,ApplicationId,CampaignId))
+            
+        else:
+            print("SF already started")
 
     #send_results(event['ApplicationId'],custom_events_batch)
 

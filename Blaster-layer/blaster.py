@@ -111,7 +111,7 @@ def place_call(phoneNumber, contactFlow,connectID,queue,attributes):
     response = False
     while retry_count < 4:
         try:
-          if(len(attributes)>0):
+            if(len(attributes)>0):
               response = connect_client.start_outbound_voice_contact(
                 DestinationPhoneNumber=phoneNumber,
                 ContactFlowId=contactFlow,
@@ -120,7 +120,7 @@ def place_call(phoneNumber, contactFlow,connectID,queue,attributes):
                 Attributes=attributes,
                 ClientToken=attributes['campaignId']+'-'+attributes['endpointId'],
                 )
-          else:
+            else:
               response = connect_client.start_outbound_voice_contact(
                 DestinationPhoneNumber=phoneNumber,
                 ContactFlowId=contactFlow,
