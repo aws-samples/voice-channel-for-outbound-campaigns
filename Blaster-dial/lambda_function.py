@@ -3,7 +3,7 @@ import json
 import boto3
 import os
 from datetime import datetime
-from blaster import place_call, updateActiveDialing, save_results, get_token
+from blaster import place_call, updateActiveDialing, save_results, get_token, exponential_backoff
 from boto3.dynamodb.conditions import Key
 
 
