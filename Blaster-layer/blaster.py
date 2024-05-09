@@ -108,7 +108,8 @@ def upload_dial_record(dialIndex,custID,phone,attributes, table):
 def place_call(phoneNumber, contactFlow,connectID,queue,attributes):
     connect_client = boto3.client('connect')
     retry_count = 0
-    while retry_count < 3:
+    response = False
+    while retry_count < 4:
         try:
           if(len(attributes)>0):
               response = connect_client.start_outbound_voice_contact(
@@ -137,11 +138,16 @@ def place_call(phoneNumber, contactFlow,connectID,queue,attributes):
                 time.sleep(delay)
                 continue
             else:
-                response = None
+                response = False
         finally:
             break
 
     return response
+
+def exponential_backoff(retry_count, base_delay=1, max_delay=32):
+    delay = min(base_delay * (2 ** retry_count), max_delay)
+    jitter = random.uniform(0, 0.1)
+    return delay + jitter
 
 def updateActiveDialing(contactId, token, phone, table):
     dynamodb = boto3.resource('dynamodb')
