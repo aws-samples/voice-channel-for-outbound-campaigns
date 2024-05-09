@@ -86,11 +86,10 @@ def lambda_handler(event, context):
 
     if(count):
         print("Contacts added to queue, validating blaster status.")
-        blasterStatus = get_config('activeBlaster', BLASTER_DEPLOYMENT)
-        print(blasterStatus)
-        if (blasterStatus == "False"):
-            print("Blaster inactive, starting.")
-            update_config('activeBlaster', "True", BLASTER_DEPLOYMENT)
+        if(check_sf_executions(SFN_ARN)):
+            print("SF already started")
+        else:
+            print("SF inactive, starting.")
             print(launchBlaster(SFN_ARN,ApplicationId,CampaignId))
 
     #send_results(event['ApplicationId'],custom_events_batch)
@@ -134,6 +133,14 @@ def get_endpoint_data(endpoint):
         return(userDetails)
     else:
         return None
+
+def check_sf_executions(sf_arn):
+    response = sfn.list_executions(
+    stateMachineArn=sf_arn,
+    statusFilter='RUNNING'
+    )
+    
+    return(len(response['executions']))
 
 def launchBlaster(sfnArn,ApplicationId,CampaignId):
     

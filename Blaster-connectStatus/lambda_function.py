@@ -51,7 +51,6 @@ def queue_status(instanceId, queueId):
     while retry_count < 3:
         try:
             hours = connect_client.describe_hours_of_operation(InstanceId=instanceId,HoursOfOperationId=queue['Queue']['HoursOfOperationId'])
-            break
         except botocore.exceptions.ClientError as error:
             print(error)
             if error.response['Error']['Code'] == 'TooManyRequestsException':
@@ -61,6 +60,8 @@ def queue_status(instanceId, queueId):
                 time.sleep(delay)
             else:
                 raise error
+        finally:
+            break
 
     timezone = pytz.timezone(hours['HoursOfOperation']['TimeZone'])    
     today = datetime.datetime.now(timezone).strftime('%A').upper()

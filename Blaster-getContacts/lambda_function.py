@@ -10,16 +10,9 @@ def lambda_handler(event, context):
     print(event)
     BLASTER_DEPLOYMENT = os.environ['BLASTER_DEPLOYMENT']
     SQS_URL = os.environ['SQS_URL']
-    concurrentCalls = int(event['concurrentCalls'])
     contacts = []
     endOfList = "False"
-    if(concurrentCalls>10):
-        messages = []
-        for i in range(round(concurrentCalls/10)):
-            msgblock = get_contact(concurrentCalls,SQS_URL)
-            messages.append(msgblock)
-    else:
-        messages = get_contact(concurrentCalls,SQS_URL)
+    messages = get_contact(1,SQS_URL)
 
     if messages is not None:
         for message in messages:

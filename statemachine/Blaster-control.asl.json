@@ -1,18 +1,9 @@
 {
-  "Comment": "Blaster Initialization and core blaster start",
-  "StartAt": "SetConfigTable",
+  "Comment": "Dialer controller",
+  "StartAt": "ActivateDialer",
   "States": {
-      "SetConfigTable": {
-      "Type": "Pass",
-      "Result": {
-        "activeBlaster": "${ParameterBlasterStatus}",
-        "dialindex": "${ParameterIndex}"
-      },
-      "ResultPath": "$.config",
-      "Next": "ActivateBlaster"
-    },
-    "ActivateBlaster": {
-      "Comment": "Activate blaster",
+    "ActivateDialer": {
+      "Comment": "Activate dialer",
       "Type": "Task",
       "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
       "Parameters": {
@@ -24,7 +15,7 @@
       "ResultPath": null
     },
     "GetConfig": {
-      "Comment": "Get configuration parameters",
+      "Comment": "Get configuration parameters from Parameters",
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Catch": [
@@ -32,7 +23,7 @@
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "deactivateBlasterDueError"
+          "Next": "deactivateDialerDueError"
         }
       ],
       "Parameters": {
@@ -41,7 +32,7 @@
           "Input.$": "$"
         }
       },
-      "Next": "Blaster",
+      "Next": "Dialer-Monitor",
       "ResultPath": "$.params",
       "ResultSelector": {
         "totalRecords.$": "$.Payload.totalRecords",
@@ -51,251 +42,282 @@
         "queue.$": "$.Payload.queue",
         "concurrentCalls.$": "$.Payload.concurrentCalls",
         "dialerThreads.$": "$.Payload.dialerThreads",
-	"timeOut.$":"$.Payload.timeOut"
+        "timeOut.$": "$.Payload.timeOut"
       }
     },
-    "Blaster": {
-      "Type": "Map",
-      "Catch": [
+    "Dialer-Monitor": {
+      "Type": "Parallel",
+      "Next": "dialerFinished",
+      "Branches": [
         {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "deactivateBlasterDueError"
-        }
-      ],
-      "ResultPath": "$.mapOutput",
-      "ItemsPath": "$.params.dialerThreads",
-      "InputPath": "$",
-      "Parameters": {
-        "params.$": "$.params",
-        "config.$": "$.config"
-      },
-      "Iterator": {
-        "StartAt": "GetBlasterStatus",
-        "States": {
-          "GetBlasterStatus": {
-            "Type": "Task",
-            "Parameters": {
-              "Name": "${ParameterBlasterStatus}"
-            },
-            "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
-            "Next": "GetConnectStatus",
-            "ResultSelector": {
-              "value.$": "$.Parameter.Value"
-            },
-            "ResultPath": "$.params.activeBlaster"
-          },
-          "GetConnectStatus": {
-            "Type": "Task",
-            "Resource": "arn:aws:states:::lambda:invoke",
-            "Parameters": {
-              "Payload": {
+          "StartAt": "Dialer",
+          "States": {
+            "Dialer": {
+              "Type": "Map",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "deactivateDialer-MapError"
+                }
+              ],
+              "ResultPath": null,
+              "ItemsPath": "$.params.dialerThreads",
+              "InputPath": "$",
+              "Parameters": {
                 "params.$": "$.params"
               },
-              "FunctionName": "${BlastergetConnectStatusArn}"
-            },
-            "Retry": [
-              {
-                "ErrorEquals": [
-                  "Lambda.ServiceException",
-                  "Lambda.AWSLambdaException",
-                  "Lambda.SdkClientException",
-                  "Lambda.TooManyRequestsException"
-                ],
-                "IntervalSeconds": 1,
-                "MaxAttempts": 3,
-                "BackoffRate": 2
-              }
-            ],
-            "Next": "isBlasterActive",
-            "ResultPath": "$.connect",
-            "ResultSelector": {
-              "queueEnabled.$": "$.Payload.queueEnabled",
-              "workingHours.$": "$.Payload.workingHours"
-            },
-            "Catch": [
-              {
-                "ErrorEquals": [
-                  "States.ALL"
-                ],
-                "Next": "ThreadFailed"
-              }
-            ]
-          },
-          "getContacts": {
-            "Type": "Task",
-            "Resource": "arn:aws:states:::lambda:invoke",
-            "Parameters": {
-              "Payload": {
-                "config.$": "$.config",
-                "params.$": "$.params",
-                "concurrentCalls": 1
-              },
-              "FunctionName": "${BlastergetContactsArn}"
-            },
-            "Retry": [
-              {
-                "ErrorEquals": [
-                  "Lambda.ServiceException",
-                  "Lambda.AWSLambdaException",
-                  "Lambda.SdkClientException",
-                  "Lambda.TooManyRequestsException"
-                ],
-                "IntervalSeconds": 1,
-                "MaxAttempts": 3,
-                "BackoffRate": 2
-              }
-            ],
-            "Next": "isListEmpty",
-            "ResultSelector": {
-              "entries.$": "$.Payload.contacts",
-              "EndOfList.$": "$.Payload.EndOfList"
-            },
-            "ResultPath": "$.contacts"
-          },
-          "isListEmpty": {
-            "Type": "Choice",
-            "Choices": [
-              {
-                "Variable": "$.contacts.EndOfList",
-                "StringEquals": "False",
-                "Next": "Dial"
-              }
-            ],
-            "Default": "ThreadDeactivateBlaster"
-          },
-          "ThreadDeactivateBlaster": {
-            "Type": "Task",
-            "Next": "ThreadCompleted",
-            "Parameters": {
-              "Name": "${ParameterBlasterStatus}",
-              "Overwrite": true,
-              "Value": "False"
-            },
-            "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
-            "Comment": "Set activeBlaster parameter to false to finish dialing process."
-          },
-          "ThreadFailed": {
-            "Type": "Pass",
-            "Next": "Fail"
-          },
-          "Fail": {
-            "Type": "Fail"
-          },
-          "Dial": {
-            "Type": "Task",
-            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
-            "Parameters": {
-              "FunctionName": "${BlasterdialArn}",
-              "Payload": {
-                "config.$": "$.config",
-                "params.$": "$.params",
-                "contacts.$": "$.contacts.entries[0]",
-                "TaskToken.$": "$$.Task.Token"
-              }
-            },
-            "Retry": [
-              {
-                "ErrorEquals": [
-                  "Lambda.ServiceException",
-                  "Lambda.AWSLambdaException",
-                  "Lambda.SdkClientException",
-                  "Lambda.TooManyRequestsException"
-                ],
-                "IntervalSeconds": 1,
-                "MaxAttempts": 3,
-                "BackoffRate": 2
-              }
-            ],
-            "Next": "GetBlasterStatus",
-	    "TimeoutSecondsPath": "$.params.timeOut",
-            "ResultPath": null,
-            "Catch": [
-              {
-                "ErrorEquals": [
-                  "States.Timeout"
-                ],
-                "Comment": "TimeOut",
-                "Next": "GetBlasterStatus",
-                "ResultPath": null
-              },
-              {
-                "ErrorEquals": [
-                  "States.ALL"
-                ],
-                "Next": "ThreadDeactivateBlaster",
-                "ResultPath": null
-              }
-            ]
-          },
-          "isBlasterActive": {
-            "Type": "Choice",
-            "Choices": [
-              {
-                "And": [
-                  {
-                    "Variable": "$.params.activeBlaster.value",
-                    "StringEquals": "True"
+              "Iterator": {
+                "StartAt": "GetDialerStatus",
+                "States": {
+                  "GetDialerStatus": {
+                    "Type": "Task",
+                    "Parameters": {
+                      "Name": "${ParameterBlasterStatus}"
+                    },
+                    "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+                    "Next": "isDialerActive",
+                    "ResultSelector": {
+                      "value.$": "$.Parameter.Value"
+                    },
+                    "ResultPath": "$.params.activeBlaster"
                   },
-                  {
-                    "Variable": "$.connect.queueEnabled",
-                    "StringEquals": "True"
+                  "getContacts": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "Payload": {
+                        "params.$": "$.params",
+                        "availAgents": 1
+                      },
+                      "FunctionName": "${BlastergetContactsArn}"
+                    },
+                    "ResultSelector": {
+                      "entries.$": "$.Payload.contacts",
+                      "EndOfList.$": "$.Payload.EndOfList"
+                    },
+                    "ResultPath": "$.contacts",
+                    "Next": "isListEmpty",
+                    "Catch": [
+                      {
+                        "ErrorEquals": [
+                          "States.ALL"
+                        ],
+                        "Next": "Fail"
+                      }
+                    ]
                   },
-                  {
-                    "Variable": "$.connect.workingHours",
-                    "StringEquals": "True"
+                  "isListEmpty": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.contacts.EndOfList",
+                        "StringEquals": "False",
+                        "Next": "Dial"
+                      }
+                    ],
+                    "Default": "Success"
+                  },
+                  "Fail": {
+                    "Type": "Fail"
+                  },
+                  "Dial": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+                    "Parameters": {
+                      "FunctionName": "${BlasterdialArn}",
+                      "Payload": {
+                        "params.$": "$.params",
+                        "contacts.$": "$.contacts.entries[0]",
+                        "TaskToken.$": "$$.Task.Token"
+                      }
+                    },
+                    "Next": "GetDialerStatus",
+                    "TimeoutSeconds": 1800,
+                    "ResultPath": null,
+                    "Catch": [
+                      {
+                        "ErrorEquals": [
+                          "States.Timeout"
+                        ],
+                        "Comment": "TimeOut",
+                        "Next": "GetDialerStatus",
+                        "ResultPath": null
+                      },
+                      {
+                        "ErrorEquals": [
+                          "States.ALL"
+                        ],
+                        "Next": "Fail",
+                        "ResultPath": null
+                      }
+                    ]
+                  },
+                  "isDialerActive": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "And": [
+                          {
+                            "Variable": "$.params.activeBlaster.value",
+                            "StringEquals": "True"
+                          }
+                        ],
+                        "Next": "getContacts"
+                      }
+                    ],
+                    "Default": "Success"
+                  },
+                  "Success": {
+                    "Type": "Succeed"
                   }
-                ],
-                "Next": "getContacts"
-              }
-            ],
-            "Default": "ThreadCompleted"
-          },
-          "ThreadCompleted": {
-            "Type": "Pass",
-            "Next": "Success"
-          },
-          "Success": {
-            "Type": "Succeed"
+                },
+                "ProcessorConfig": {
+                  "Mode": "DISTRIBUTED",
+                  "ExecutionType": "STANDARD"
+                }
+              },
+              "Label": "Dialer",
+              "MaxConcurrency": 1000,
+              "ToleratedFailurePercentage": 50,
+              "Next": "deactivateDialer"
+            },
+            "deactivateDialer": {
+              "Comment": "Deactivate dialer",
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+              "Parameters": {
+                "Name": "${ParameterBlasterStatus}",
+                "Overwrite": true,
+                "Value": "False"
+              },
+              "End": true
+            },
+            "deactivateDialer-MapError": {
+              "Comment": "Deactivate dialer due a problem",
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+              "Parameters": {
+                "Name": "${ParameterBlasterStatus}",
+                "Overwrite": true,
+                "Value": "False"
+              },
+              "End": true
+            }
           }
         },
-        "ProcessorConfig": {
-          "Mode": "DISTRIBUTED",
-          "ExecutionType": "STANDARD"
+        {
+          "StartAt": "GetDialerStatus-Monitor",
+          "States": {
+            "GetDialerStatus-Monitor": {
+              "Type": "Task",
+              "Parameters": {
+                "Name": "${ParameterBlasterStatus}"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+              "ResultSelector": {
+                "value.$": "$.Parameter.Value"
+              },
+              "ResultPath": "$.params.activeBlaster",
+              "Next": "GetConnectStatus"
+            },
+            "GetConnectStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "Payload": {
+                  "params.$": "$.params"
+                },
+                "FunctionName": "${BlastergetConnectStatusArn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "ResultPath": "$.connect",
+              "ResultSelector": {
+                "queueEnabled.$": "$.Payload.queueEnabled",
+                "workingHours.$": "$.Payload.workingHours"
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "ThreadDeactivateDialer"
+                }
+              ],
+              "Next": "isDialerActive-Monitor"
+            },
+            "isDialerActive-Monitor": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "And": [
+                    {
+                      "Variable": "$.params.activeBlaster.value",
+                      "StringEquals": "True"
+                    },
+                    {
+                      "Variable": "$.connect.queueEnabled",
+                      "StringEquals": "True"
+                    },
+                    {
+                      "Variable": "$.connect.workingHours",
+                      "StringEquals": "True"
+                    }
+                  ],
+                  "Next": "Wait"
+                }
+              ],
+              "Default": "ThreadDeactivateDialer"
+            },
+            "ThreadDeactivateDialer": {
+              "Type": "Task",
+              "Parameters": {
+                "Name": "${ParameterBlasterStatus}",
+                "Overwrite": true,
+                "Value": "False"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
+              "Comment": "Set activeDialer parameter to false to finish dialing process.",
+              "End": true
+            },
+            "Wait": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "GetDialerStatus-Monitor"
+            }
+          }
         }
-      },
-      "Next": "deactivateBlaster",
-      "Label": "Blaster",
-      "MaxConcurrency": 1000,
-      "ToleratedFailurePercentage": 50
+      ],
+      "ResultPath": null
     },
-    "deactivateBlaster": {
-      "Comment": "Deactivate blaster",
+    "deactivateDialerDueError": {
+      "Comment": "Deactivate dialer due a problem",
       "Type": "Task",
       "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
       "Parameters": {
         "Name": "${ParameterBlasterStatus}",
-        "Overwrite":true,
+        "Overwrite": true,
         "Value": "False"
       },
-      "Next": "blasterFinished"
+      "Next": "dialerError"
     },
-    "deactivateBlasterDueError": {
-      "Comment": "Deactivate blaster due a problem",
-      "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ssm:putParameter",
-      "Parameters": {
-        "Name": "${ParameterBlasterStatus}",
-        "Overwrite":true,
-        "Value": "False"
-      },
-      "Next": "blasterError"
-    },
-    "blasterFinished": {
+    "dialerFinished": {
       "Type": "Succeed"
     },
-    "blasterError": {
+    "dialerError": {
       "Type": "Fail"
     }
   }

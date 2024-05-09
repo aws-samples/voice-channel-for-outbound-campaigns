@@ -8,7 +8,8 @@ ssm=boto3.client('ssm')
 def lambda_handler(event, context):
     BLASTER_DEPLOYMENT = os.environ['BLASTER_DEPLOYMENT']
     config=get_parameters(BLASTER_DEPLOYMENT)
-    config['dialerThreads']= [0]*config['concurrentCalls']
+    config['concurrentCalls'] = int(config['concurrentCalls'])
+    config['dialerThreads']= [0]*int(config['concurrentCalls'])
     return config
     
 def get_parameters(deployment):
@@ -37,3 +38,32 @@ def get_parameters(deployment):
         return None
     else:
         return config
+
+
+def get_available_agents(connectid,queue):
+    
+    connect_client = boto3.client('connect')
+    response = connect_client.get_current_metric_data(
+    InstanceId=connectid,
+    Filters={
+        'Queues': [
+            queue,
+        ],
+        'Channels': [
+            'VOICE',
+        ]
+    },
+    CurrentMetrics=[
+        {
+            'Name': 'AGENTS_ONLINE',
+            'Unit': 'COUNT'
+        },
+    ],
+)
+    #print("Available Agents Metrics :" + str(response['MetricResults']))
+    
+    if(response['MetricResults']):
+        availAgents = int(response['MetricResults'][0]['Collections'][0]['Value'])
+    else: 
+        availAgents =0
+    return availAgents

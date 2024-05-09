@@ -2,10 +2,12 @@
 import json
 import boto3
 import time
+import random
 import os
 from datetime import datetime
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+
 
 
     
@@ -105,9 +107,11 @@ def upload_dial_record(dialIndex,custID,phone,attributes, table):
 
 def place_call(phoneNumber, contactFlow,connectID,queue,attributes):
     connect_client = boto3.client('connect')
-    try:
-        if(len(attributes)>0):
-            response = connect_client.start_outbound_voice_contact(
+    retry_count = 0
+    while retry_count < 3:
+        try:
+          if(len(attributes)>0):
+              response = connect_client.start_outbound_voice_contact(
                 DestinationPhoneNumber=phoneNumber,
                 ContactFlowId=contactFlow,
                 InstanceId=connectID,
@@ -115,18 +119,28 @@ def place_call(phoneNumber, contactFlow,connectID,queue,attributes):
                 Attributes=attributes,
                 ClientToken=attributes['campaignId']+'-'+attributes['endpointId'],
                 )
-        else:
-            response = connect_client.start_outbound_voice_contact(
+          else:
+              response = connect_client.start_outbound_voice_contact(
                 DestinationPhoneNumber=phoneNumber,
                 ContactFlowId=contactFlow,
                 InstanceId=connectID,
                 ClientToken=attributes['campaignId']+'-'+attributes['endpointId'],
                 QueueId=queue
                 )
-    except Exception as e:
-        print(e)
-        print("phone" + str(phoneNumber))
-        response = None
+            
+        except ClientError as error:
+            print(error)
+            if error.response['Error']['Code'] == 'TooManyRequestsException':
+                print("TooManyRequestsException, waiting.")
+                retry_count += 1
+                delay = exponential_backoff(retry_count)
+                time.sleep(delay)
+                continue
+            else:
+                response = None
+        finally:
+            break
+
     return response
 
 def updateActiveDialing(contactId, token, phone, table):
