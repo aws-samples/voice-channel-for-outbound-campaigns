@@ -86,7 +86,7 @@ def lambda_handler(event, context):
 
     if(count):
         print("Contacts added to queue, validating blaster status.")
-        dialerStatus = get_config('activeDialer', DIALER_DEPLOYMENT)
+        dialerStatus = get_config('activeDialer', BLASTER_DEPLOYMENT)
         if(dialerStatus == "False" and check_sf_executions(SFN_ARN)):
             print("SF already started")
         else:
