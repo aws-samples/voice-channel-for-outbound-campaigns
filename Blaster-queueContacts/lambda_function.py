@@ -52,27 +52,17 @@ def lambda_handler(event, context):
             if('attributes' in data):
                 attributes.update(data['attributes'])
 
-            if(data):
-              validated_number = validate_endpoint(data['phone'],countrycode,isocountrycode)
-
-              if(validated_number and 'PhoneType' in validated_number and validated_number['PhoneType']!='INVALID'):
-                attributes['phonetype']=validated_number['PhoneType']
-                try:
-                  print("Queuing",'+'+countrycode+data['phone'],data['custID'],attributes)
-                  queue_contact(data['custID'],'+'+countrycode+data['phone'],attributes,SQS_URL)
-                except Exception as e:
-                    print("Failed to queue")
-                    print(e)
-                else:
-                    #custom_events_batch[key] = create_success_custom_event(key, CampaignId, body)
-                    results = {'CampaignStep':'Queueing','phone':str(data['phone']),'validNumber':True,'CampaignId':CampaignId,"EndpointStatus":"Queued"}
-                    save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
-                    count+=1
-              else:
-                print("Invalid phone number:" + str(data['phone']))
-                #custom_events_batch[key] = create_failure_custom_event(key, CampaignId, "Invalid phone")
+            try:
+                count+=1
+                print("Queuing",'+'+countrycode+data['phone'],data['custID'],attributes)
+                queue_contact(data['custID'],'+'+countrycode+data['phone'],attributes,SQS_URL)
+            except Exception as e:
                 errors+=1
-                results = {'CampaignStep':'Queueing','phone':str(data['phone']),'validNumber':False,'CampaignId':CampaignId,"EndpointStatus":"InvalidPhone"}
+                print("Failed to queue")
+                print(e)
+            else:
+                print("Added to queue:" + str(data['phone']))
+                results = {'CampaignStep':'Queueing','phone':str(data['phone']),'validNumber':True,'CampaignId':CampaignId,"EndpointStatus":"InvalidPhone"}
                 save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
 
 
@@ -81,19 +71,13 @@ def lambda_handler(event, context):
             results = {'CampaignStep':'Queueing','phone':str(data['phone']),'validNumber':False,'CampaignId':CampaignId,"EndpointStatus":"TemplateNotFound"}
             save_results(results,BLASTER_DEPLOYMENT,RESULTS_FIREHOSE_NAME)
             break
-            #custom_events_batch[key] = create_failure_custom_event(key, CampaignId, "Template not found")
-            #pause_campaign(ApplicationId,CampaignId) #Only works for recurring campaigns
 
     if(count):
-        print("Contacts added to queue, validating blaster status.")
-        dialerStatus = get_config('activeBlaster', BLASTER_DEPLOYMENT)
-        sfStatus = int(check_sf_executions(SFN_ARN))
-        print('dialerStatus',dialerStatus)
-        print('sfStatus',sfStatus)
-        if(dialerStatus == "False" and sfStatus==0):
-            print("SF inactive, starting.")
-            print(launchBlaster(SFN_ARN,ApplicationId,CampaignId))
-            
+        print("Contacts added to queue, attempting start on SF")
+        launch_result = launchBlaster(SFN_ARN,ApplicationId,CampaignId)
+        
+        if(launch_result):
+            print("SF started")
         else:
             print("SF already started")
 
@@ -153,10 +137,16 @@ def launchBlaster(sfnArn,ApplicationId,CampaignId):
         'ApplicationId':ApplicationId,
         'CampaignId' : CampaignId
         }
-    response = sfn.start_execution(
-    stateMachineArn=sfnArn,
-    input = json.dumps(inputData)
-    )
+    try:
+        response = sfn.start_execution(
+        stateMachineArn=sfnArn,
+        name=ApplicationId+CampaignId,
+        input = json.dumps(inputData)
+        )
+    except Exception as e:
+        print("SF not launched")
+        print(e)
+        return False
     return response
 
 def get_campaign_details(applicationid,campaignid):

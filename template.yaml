@@ -521,6 +521,8 @@ Resources:
       Role: !GetAtt BlasterLambdaRole.Arn
       CodeUri: Blaster-queueContacts/
       Handler: lambda_function.lambda_handler
+      MemorySize: 512
+      Timeout: 600
       Layers:
         - !Ref Blaster
       Environment: 
